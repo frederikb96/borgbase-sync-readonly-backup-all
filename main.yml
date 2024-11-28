@@ -1,0 +1,9 @@
+---
+- hosts: all
+  tasks:
+    # Copy the template script to .local/bin
+    - name: Copy script
+      template:
+        src: templates/script.sh.j2
+        dest: "{{ ansible_env.HOME }}/.local/bin/my-borgbase-sync.sh"
+        mode: '0755'

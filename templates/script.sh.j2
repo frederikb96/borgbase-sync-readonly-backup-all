@@ -1,0 +1,97 @@
+#!/bin/bash
+
+# Parse the arguments
+FLAG=""
+if [ "$1" = "--bypass-lock" ]; then
+    echo "Bypassing lock. This is very dangerous and only used if 100% sure that no other borg operation can write to the archive, so no compacting and only append-only mode activated"
+    # Check if the user wants to continue
+    read -p "Do you want to continue? (y/n) " -n 1 -r
+    echo
+    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+        exit 1
+    fi
+    FLAG="--bypass-lock"
+fi
+
+# Check if run as root if not exit and ask to run as root
+if [ "$EUID" -ne 0 ]
+  then echo "Please run as root"
+  exit 1
+fi
+
+# Function to handle cleanup on exit
+cleanup() {
+    echo -e "\n\nCaught SIGINT. Cleaning up..."
+    # Umounting all borg mounts
+{% for repo in repos %}
+    echo "Unmounting {{ repo.mount_name }}"
+    borg umount {{ BORG_MNT }}/{{ repo.mount_name }} 2>&1 | grep -v 'not found in'
+{% endfor %}
+    exit 1
+}
+
+# Trap SIGINT (Ctrl+C) to ensure cleanup
+trap cleanup SIGINT
+
+# Check if the disk is mounted
+if ! mountpoint -q {{ DISK_MNT }}; then
+    echo "Disk not mounted. Exiting..."
+    exit 1
+fi
+
+# Sync each repository
+{% for repo in repos %}
+
+#### Syncing {{ repo.mount_name }} ####
+echo -e "\n\n\nSyncing {{ repo.mount_name }}\n"
+
+# List the archives in the repository and get the latest one
+NEWEST_ARCHIVE=$(BORG_RSH='{{ BORG_RSH }}' BORG_REPO='{{ repo.BORG_REPO }}' BORG_PASSPHRASE='{{ repo.BORG_PASSPHRASE }}' borg list --last 1 | awk '{print $1}')
+
+# Check if the command was successful
+if [ $? -ne 0 ]; then
+    echo "Failed to mount {{ repo.mount_name }}. Exiting..."
+    cleanup
+fi
+
+# Check if non empty
+if [ -z "${NEWEST_ARCHIVE}" ]; then
+    echo "No archives found in {{ repo.mount_name }}. Exiting..."
+    cleanup
+fi
+
+echo "Syncing archive: ${NEWEST_ARCHIVE}"
+
+# Then mount the archive
+mkdir -p "{{ BORG_MNT }}/{{ repo.mount_name }}"
+BORG_RSH='{{ BORG_RSH }}' BORG_REPO='{{ repo.BORG_REPO }}' BORG_PASSPHRASE='{{ repo.BORG_PASSPHRASE }}' borg mount $FLAG ::${NEWEST_ARCHIVE} "{{ BORG_MNT }}/{{ repo.mount_name }}"
+
+# Check if the command was successful
+if [ $? -ne 0 ]; then
+    echo "Failed to mount {{ repo.mount_name }}. Exiting..."
+    cleanup
+fi
+
+# Validate that the mounted dir at least contains one file
+if [ ! "$(ls -A {{ BORG_MNT }}/{{ repo.mount_name }})" ]; then
+    echo "No files in the mounted directory. Exiting..."
+    cleanup
+fi
+
+# Check if the disk is mounted
+if ! mountpoint -q {{ DISK_MNT }}; then
+    echo "Disk not mounted amymore. Exiting..."
+    cleanup
+fi
+
+# Then rsync the mounted archive to the mounted disk
+rsync -aPh --delete "{{ BORG_MNT }}/{{ repo.mount_name }}/" "{{ DISK_MNT }}/{{ repo.mount_name }}/"
+
+# Unmount the borg mount
+echo "Unmounting {{ repo.mount_name }}"
+borg umount "{{ BORG_MNT }}/{{ repo.mount_name }}"
+
+{% endfor %}
+
+# Cleanup
+echo -e "\n\n\nSyncing Completed\n"
